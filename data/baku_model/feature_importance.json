@@ -1,0 +1,14 @@
+{
+  "quali_pos_norm": 0.4757985472679138,
+  "grid_norm": 0.34585896134376526,
+  "speed_bias": 0.04140457510948181,
+  "quali_no_time": 0.040756698697805405,
+  "overtaking_ease": 0.03422119840979576,
+  "driver_dnf_rate": 0.019410282373428345,
+  "quali_gap_pct": 0.010837988927960396,
+  "tyre_stress": 0.008675375953316689,
+  "practice_gap_pct": 0.0076893409714102745,
+  "streetness": 0.005371272098273039,
+  "weather_risk_index": 0.0050371610559523106,
+  "grid_track_position": 0.004938556347042322
+}
