@@ -75,3 +75,33 @@ The original Monte Carlo step added symmetric Gaussian noise to the predicted fi
 
 ### 4.6 Full-field ranking output
 The original script only printed the top 3 by average predicted position. The script now reports, for all 22 grid slots: average finishing position, win probability, podium (top-3) probability, and points-finish (top-10) probability, in addition to the predicted top-3 podium call.
+
+---
+
+## 5. Model Evaluation
+
+The original script had no evaluation step at all — it printed a ranking with no way to tell whether the model or the simulation could be trusted. Two evaluations were added, answering two different questions, because there is no ground truth to backtest against yet: **the Baku 2026 race has not been driven**, and this environment's network policy blocks the FastF1 live-timing and Ergast-mirror hosts that would otherwise supply real historical results to validate against (confirmed directly: `livetiming.formula1.com`, `api.jolpi.ca`, and `formula1.com` all return a proxy-level 403; only FastF1's GitHub-hosted schedule endpoint is reachable). Both evaluations below therefore check **internal consistency** — does the model reproduce the physics we declared, and is the simulation's probability math unbiased — not real-world backtest accuracy. This distinction is stated explicitly in the saved metrics file so it is never mistaken for a real-world accuracy claim.
+
+### 5.1 Regression fit (`evaluate_regression_fit`)
+An 80/20 train/test split of the synthetic corpus (Section 4.4). The model is retrained on the 80% and scored against the **held-out 20% it never saw**:
+* **MAE / RMSE** (mean absolute / root-mean-squared error against the true finish index) — how far off, on average, the model's raw score is.
+* **R²** — how much of the variance in the true finish index the model explains.
+* **Spearman rank correlation** — this is the metric that actually matters for a *ranking* problem: it measures whether the model gets the **order** of drivers right, independent of the exact score values. A Spearman of 1.0 would mean a perfect ranking even if the raw scores were off by a constant.
+
+Latest run: MAE 2.75, RMSE 4.06, R² 0.76, Spearman 0.89 (n_test = 2,000). A Spearman above 0.85 means the model reliably recovers the intended grid/quali/DNF/track ordering on unseen synthetic examples.
+
+### 5.2 Simulation calibration (`evaluate_calibration`)
+This addresses the "precision/recall"-style question directly: **when the simulation says a driver has an X% chance to win, does that driver actually win about X% of the time?**
+
+Method: 300 synthetic mock races are generated from the same generative assumptions as the training corpus. For each one, the trained model + Monte Carlo simulator produce an ex-ante win probability per driver (400 inner simulations), and then **one** race is actually "run" by drawing a single outcome from the identical noise/DNF process. Repeating this many times and comparing predicted probability to realized frequency is the standard way to check probability calibration (a reliability diagram).
+
+Metrics reported:
+* **Brier score** (lower is better, 0 = perfect): mean squared error between predicted win probability and the realized 0/1 outcome. 0.024 is very good — a coin-flip model with no information would score ~0.25 on binary outcomes.
+* **Log loss** (lower is better): penalizes confident wrong predictions more heavily than Brier score.
+* **Top-1 winner accuracy**: how often the driver the model rated the *most* likely winner actually won — the classification-style "precision" analogue for the win prediction. 63.7% in the latest run (a field of 20 drivers with a uniform prior would score 5%).
+* **Podium precision@3**: of the 3 drivers predicted to finish on the podium, what fraction actually did — the direct precision@k answer to "did we do precision/recall." 77.1% in the latest run.
+* **Reliability table**: predicted-probability deciles (0–10%, 10–20%, …) next to the realized win rate in each bucket. In the latest run these track each other closely across every bucket (e.g. the 80–90% bucket predicted 85.6% on average and realized an 83.3% win rate) — evidence the simulation isn't systematically over- or under-confident.
+
+All of the above is saved to `data/baku_model/evaluation_metrics.json` on every run, alongside `data/baku_model/feature_importance.json`.
+
+**What this evaluation does *not* prove**: that the Baku 2026 grid predictions themselves are accurate, since that requires the actual race result. What it does prove: the model correctly learns the declared monotonic structure on new data, and the Monte Carlo simulation's probability outputs are not biased relative to the assumptions that generated them. Once real per-race results become fetchable (either the network policy allows FastF1/Ergast, or the race has been run and archived), the same harness should be re-pointed at real historical results for a genuine backtest — that is a natural next step, not yet done here.

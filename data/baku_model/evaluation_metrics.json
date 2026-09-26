@@ -1,0 +1,82 @@
+{
+  "regression_fit": {
+    "n_train": 8000,
+    "n_test": 2000,
+    "mae": 2.746573509429354,
+    "rmse": 4.060510339197349,
+    "r2": 0.7584987081889252,
+    "spearman_rank_correlation": 0.8910671167667792
+  },
+  "calibration": {
+    "n_trials": 300,
+    "inner_sims_per_trial": 400,
+    "field_size": 20,
+    "brier_score_win_prob": 0.024203804166666665,
+    "log_loss_win_prob": 0.08237617859539725,
+    "top1_winner_accuracy": 0.6366666666666667,
+    "podium_precision_at_3_mean": 0.7711111111111112,
+    "reliability_table": [
+      {
+        "bucket": "0.00-0.10",
+        "n": 5379,
+        "mean_predicted_win_prob": 0.003597787692879718,
+        "actual_win_rate": 0.00594906116378509
+      },
+      {
+        "bucket": "0.10-0.20",
+        "n": 143,
+        "mean_predicted_win_prob": 0.14470279720279722,
+        "actual_win_rate": 0.14685314685314685
+      },
+      {
+        "bucket": "0.20-0.30",
+        "n": 95,
+        "mean_predicted_win_prob": 0.24676315789473688,
+        "actual_win_rate": 0.25263157894736843
+      },
+      {
+        "bucket": "0.30-0.40",
+        "n": 78,
+        "mean_predicted_win_prob": 0.34987179487179493,
+        "actual_win_rate": 0.34615384615384615
+      },
+      {
+        "bucket": "0.40-0.50",
+        "n": 66,
+        "mean_predicted_win_prob": 0.4484469696969696,
+        "actual_win_rate": 0.4393939393939394
+      },
+      {
+        "bucket": "0.50-0.60",
+        "n": 47,
+        "mean_predicted_win_prob": 0.5550531914893617,
+        "actual_win_rate": 0.46808510638297873
+      },
+      {
+        "bucket": "0.60-0.70",
+        "n": 48,
+        "mean_predicted_win_prob": 0.6469270833333333,
+        "actual_win_rate": 0.6458333333333334
+      },
+      {
+        "bucket": "0.70-0.80",
+        "n": 46,
+        "mean_predicted_win_prob": 0.751358695652174,
+        "actual_win_rate": 0.6086956521739131
+      },
+      {
+        "bucket": "0.80-0.90",
+        "n": 48,
+        "mean_predicted_win_prob": 0.8555208333333333,
+        "actual_win_rate": 0.8333333333333334
+      },
+      {
+        "bucket": "0.90-1.00",
+        "n": 50,
+        "mean_predicted_win_prob": 0.93715,
+        "actual_win_rate": 0.92
+      }
+    ],
+    "note": "Self-consistency check against the pipeline's own generative assumptions, not a backtest against real race results (unavailable in this environment - see assumptions.md section 5)."
+  }
+}

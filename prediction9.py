@@ -19,6 +19,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
+from scipy.stats import spearmanr
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
 try:
@@ -382,47 +385,51 @@ def compute_dnf_rate(team: str) -> float:
 # Synthetic, physics-consistent training corpus
 # ---------------------------------------------------------------------------
 
-def build_training_data(seed: int, n_samples: int = 8000) -> pd.DataFrame:
-    """Generate a training corpus that actually varies each feature and its
-    label according to the monotone relationships declared in assumptions.md,
-    rather than fitting the model on a single circular (grid -> grid) row set.
-    This is a synthetic teaching corpus, not a claim of real historical results.
+def _deterministic_finish_index(frame: pd.DataFrame) -> np.ndarray:
+    """The declared-monotonic 'true skill' component of the finish index,
+    with no race-day noise or DNF applied. Shared by the synthetic training
+    corpus and the evaluation harness so both draw from the same assumptions.
     """
-    rng = np.random.default_rng(seed)
-    tracks = list(TRACK_META.values()) + [TRACK]
-    n = n_samples
+    return (
+        18.0 * frame["grid_norm"]
+        + 6.0 * frame["quali_pos_norm"]
+        + 40.0 * frame["quali_gap_pct"]
+        + 5.0 * frame["quali_no_time"]
+        + 8.0 * frame["driver_dnf_rate"]
+        + 3.0 * frame["speed_bias"]
+        + 3.0 * frame["overtaking_ease"]
+        + 2.0 * frame["tyre_stress"]
+        - 4.0 * frame["grid_track_position"]
+        + 10.0 * frame["practice_gap_pct"]
+        + 5.0 * frame["weather_risk_index"] * frame["driver_dnf_rate"]
+    ).to_numpy()
 
+
+def _sample_synthetic_grid(rng: np.random.Generator, n: int, field_size: int | None = None) -> pd.DataFrame:
+    """Draw n independent synthetic driver rows (feature columns only, no
+    label) across the known track priors. Used both to build the training
+    corpus (independent rows) and, per-race, for evaluation trials.
+    """
+    tracks = list(TRACK_META.values()) + [TRACK]
     track_idx = rng.integers(0, len(tracks), size=n)
     track_arr = np.array(tracks)[track_idx]
     streetness, speed_bias, overtaking_ease, tyre_stress = (track_arr[:, i] for i in range(4))
 
-    grid = rng.integers(1, 21, size=n).astype(float)
-    grid_norm = (grid - 1) / 19.0
-    quali_pos = np.clip(grid + rng.normal(0, 1.0, size=n), 1, 20)
-    quali_pos_norm = (quali_pos - 1) / 19.0
+    max_grid = field_size if field_size else 20
+    if field_size:
+        grid = rng.permutation(field_size)[:n] + 1
+    else:
+        grid = rng.integers(1, max_grid + 1, size=n)
+    grid = grid.astype(float)
+    grid_norm = (grid - 1) / (max_grid - 1)
+    quali_pos = np.clip(grid + rng.normal(0, 1.0, size=n), 1, max_grid)
+    quali_pos_norm = (quali_pos - 1) / (max_grid - 1)
     quali_gap_pct = np.clip(rng.exponential(0.006, size=n) * (1.0 + 2.0 * quali_pos_norm), 0, 0.06)
     quali_no_time = (rng.random(n) < 0.03).astype(float)
     driver_dnf_rate = rng.uniform(0.03, 0.18, size=n)
     grid_track_position = grid_norm * (1.0 - overtaking_ease)
     practice_gap_pct = np.clip(quali_gap_pct + rng.normal(0, 0.003, size=n), 0, 0.08)
-    weather_risk_index = rng.uniform(0.0, 1.0, size=n)
-
-    finish_index = (
-        18.0 * grid_norm
-        + 6.0 * quali_pos_norm
-        + 40.0 * quali_gap_pct
-        + 5.0 * quali_no_time
-        + 8.0 * driver_dnf_rate
-        + 3.0 * speed_bias
-        + 3.0 * overtaking_ease
-        + 2.0 * tyre_stress
-        - 4.0 * grid_track_position
-        + 10.0 * practice_gap_pct
-        + 5.0 * weather_risk_index * driver_dnf_rate
-    )
-    dnf_event = rng.random(n) < driver_dnf_rate * (1.0 + 0.5 * weather_risk_index)
-    finish_index = finish_index + dnf_event * rng.uniform(8, 15, size=n)
-    finish_index = finish_index + rng.normal(0, 1.5, size=n)
+    weather_risk_index = rng.uniform(0.0, 1.0, size=n) if field_size is None else np.full(n, rng.uniform(0.05, 0.6))
 
     return pd.DataFrame({
         "grid_norm": grid_norm,
@@ -437,8 +444,152 @@ def build_training_data(seed: int, n_samples: int = 8000) -> pd.DataFrame:
         "grid_track_position": grid_track_position,
         "practice_gap_pct": practice_gap_pct,
         "weather_risk_index": weather_risk_index,
-        "finish_index": finish_index,
     })
+
+
+def build_training_data(seed: int, n_samples: int = 8000) -> pd.DataFrame:
+    """Generate a training corpus that actually varies each feature and its
+    label according to the monotone relationships declared in assumptions.md,
+    rather than fitting the model on a single circular (grid -> grid) row set.
+    This is a synthetic teaching corpus, not a claim of real historical results.
+    """
+    rng = np.random.default_rng(seed)
+    frame = _sample_synthetic_grid(rng, n_samples)
+
+    finish_index = _deterministic_finish_index(frame)
+    dnf_event = rng.random(n_samples) < frame["driver_dnf_rate"].to_numpy() * (
+        1.0 + 0.5 * frame["weather_risk_index"].to_numpy())
+    finish_index = finish_index + dnf_event * rng.uniform(8, 15, size=n_samples)
+    finish_index = finish_index + rng.normal(0, 1.5, size=n_samples)
+
+    frame["finish_index"] = finish_index
+    return frame
+
+
+# ---------------------------------------------------------------------------
+# Model evaluation
+#
+# Two different questions, evaluated two different ways (see assumptions.md
+# section 5 for the full explanation):
+#   1. Regression fit  - did XGBoost actually learn the declared monotonic
+#      relationship, on rows it did not train on?
+#   2. Probability calibration - when the simulation says "62% to win", does
+#      that driver actually win about 62% of the time, under our own stated
+#      assumptions? (Brier score, log loss, top-1 accuracy, precision@3.)
+#
+# Neither of these is a backtest against real Baku 2026 results: the race
+# has not been driven yet, and this sandbox's network policy blocks the
+# FastF1/Ergast hosts that would otherwise supply real historical results to
+# backtest against (see the "Grid/qualifying data source" line the pipeline
+# prints). Both evals instead check internal consistency: does the model
+# reproduce our own declared physics, and is the simulation's math unbiased.
+# ---------------------------------------------------------------------------
+
+def evaluate_regression_fit(seed: int, n_samples: int = 10000, test_size: float = 0.2) -> dict:
+    """Train/test split of the synthetic corpus; report standard regression
+    metrics (MAE, RMSE, R^2) plus Spearman rank correlation, since what the
+    simulation actually consumes is driver *order*, not the raw index value.
+    """
+    corpus = build_training_data(seed, n_samples=n_samples)
+    train_df, test_df = train_test_split(corpus, test_size=test_size, random_state=seed)
+
+    model = make_model(seed)
+    model.fit(train_df[FEATURES], train_df["finish_index"])
+    preds = model.predict(test_df[FEATURES])
+    truth = test_df["finish_index"].to_numpy()
+
+    rho, _ = spearmanr(truth, preds)
+    return {
+        "n_train": len(train_df),
+        "n_test": len(test_df),
+        "mae": float(mean_absolute_error(truth, preds)),
+        "rmse": float(np.sqrt(mean_squared_error(truth, preds))),
+        "r2": float(r2_score(truth, preds)),
+        "spearman_rank_correlation": float(rho),
+    }
+
+
+def _reliability_table(pred: np.ndarray, actual: np.ndarray, n_bins: int = 10) -> list[dict]:
+    bins = np.linspace(0, 1, n_bins + 1)
+    bucket = np.clip(np.digitize(pred, bins) - 1, 0, n_bins - 1)
+    rows = []
+    for b in range(n_bins):
+        mask = bucket == b
+        if not mask.any():
+            continue
+        rows.append({
+            "bucket": f"{bins[b]:.2f}-{bins[b + 1]:.2f}",
+            "n": int(mask.sum()),
+            "mean_predicted_win_prob": float(pred[mask].mean()),
+            "actual_win_rate": float(actual[mask].mean()),
+        })
+    return rows
+
+
+def evaluate_calibration(model: XGBRegressor, n_trials: int = 300, inner_sims: int = 400,
+                          field_size: int = 20, seed: int = SEED + 1) -> dict:
+    """Self-consistency check for the Monte Carlo step: simulate many synthetic
+    'races' from the same generative assumptions the model was trained on,
+    have the trained model + simulator produce ex-ante win probabilities, then
+    draw one 'realized' outcome per race from the identical noise/DNF process
+    and check whether predicted probabilities match realized frequencies.
+    """
+    rng = np.random.default_rng(seed)
+    pred_win_all, actual_win_all = [], []
+    precision_at_3, top1_hits = [], 0
+
+    for _ in range(n_trials):
+        frame = _sample_synthetic_grid(rng, field_size, field_size=field_size)
+        true_index = _deterministic_finish_index(frame)
+        base_preds = model.predict(frame[FEATURES])
+
+        tyre_stress = frame["tyre_stress"].iloc[0]
+        streetness = frame["streetness"].iloc[0]
+        weather_risk = frame["weather_risk_index"].iloc[0]
+        dnf_rate = frame["driver_dnf_rate"].to_numpy()
+        dnf_prob = np.clip(dnf_rate * (1.0 + 0.5 * weather_risk), 0, 0.6)
+        noise_scale = 1.0 * (0.6 + 0.5 * tyre_stress + 0.3 * streetness + 0.4 * weather_risk)
+
+        noise = rng.normal(0, 1.0, size=(inner_sims, field_size)) * noise_scale
+        scores = base_preds + noise
+        dnf_draws = rng.random((inner_sims, field_size)) < dnf_prob
+        scores = np.where(dnf_draws, scores + rng.uniform(8, 15, size=scores.shape), scores)
+        ranks = np.argsort(np.argsort(scores, axis=1), axis=1) + 1
+        win_prob = (ranks == 1).mean(axis=0)
+
+        true_noise = rng.normal(0, 1.0, size=field_size) * noise_scale
+        true_scores = true_index + true_noise
+        true_dnf = rng.random(field_size) < dnf_prob
+        true_scores = np.where(true_dnf, true_scores + rng.uniform(8, 15, size=field_size), true_scores)
+        true_rank = np.argsort(np.argsort(true_scores)) + 1
+        actual_win = (true_rank == 1).astype(float)
+        actual_top3 = true_rank <= 3
+
+        pred_win_all.append(win_prob)
+        actual_win_all.append(actual_win)
+        predicted_top3_idx = np.argsort(base_preds)[:3]
+        precision_at_3.append(np.isin(predicted_top3_idx, np.where(actual_top3)[0]).sum() / 3.0)
+        top1_hits += int(actual_win[np.argmax(win_prob)] == 1)
+
+    pred_win = np.concatenate(pred_win_all)
+    actual_win = np.concatenate(actual_win_all)
+    eps = 1e-9
+    brier = float(np.mean((pred_win - actual_win) ** 2))
+    log_loss = float(-np.mean(actual_win * np.log(pred_win + eps) + (1 - actual_win) * np.log(1 - pred_win + eps)))
+
+    return {
+        "n_trials": n_trials,
+        "inner_sims_per_trial": inner_sims,
+        "field_size": field_size,
+        "brier_score_win_prob": brier,
+        "log_loss_win_prob": log_loss,
+        "top1_winner_accuracy": top1_hits / n_trials,
+        "podium_precision_at_3_mean": float(np.mean(precision_at_3)),
+        "reliability_table": _reliability_table(pred_win, actual_win),
+        "note": ("Self-consistency check against the pipeline's own generative "
+                 "assumptions, not a backtest against real race results (unavailable "
+                 "in this environment - see assumptions.md section 5)."),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -517,7 +668,7 @@ def run_simulations(df_input: pd.DataFrame, weather_risk: float,
 
 
 def save_outputs(model: XGBRegressor, results: pd.DataFrame, weather_risk: float,
-                  weather_source: str, data_source: str) -> None:
+                  weather_source: str, data_source: str, evaluation: dict) -> None:
     DATA.mkdir(parents=True, exist_ok=True)
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     results.to_csv(DATA / "baku_2026_predictions.csv", index=False)
@@ -525,6 +676,8 @@ def save_outputs(model: XGBRegressor, results: pd.DataFrame, weather_risk: float
     importances = dict(zip(FEATURES, (float(v) for v in model.feature_importances_)))
     with open(ARTIFACTS / "feature_importance.json", "w") as fh:
         json.dump(dict(sorted(importances.items(), key=lambda kv: kv[1], reverse=True)), fh, indent=2)
+    with open(ARTIFACTS / "evaluation_metrics.json", "w") as fh:
+        json.dump(evaluation, fh, indent=2)
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "race": RACE_NAME,
@@ -557,7 +710,21 @@ if __name__ == "__main__":
     print(f"\nRunning {args.sims} Monte Carlo simulations for {RACE_NAME}...\n")
     results, model = run_simulations(df_drivers, weather_risk, num_simulations=args.sims)
 
-    print(f"{'Pos':>3} {'Driver':6} {'Team':<16} {'Grid':>4}  {'AvgPos':>6}  {'Win%':>6}  {'Podium%':>8}  {'Top10%':>7}")
+    print("Evaluating model fit (held-out synthetic regression check)...")
+    regression_eval = evaluate_regression_fit(SEED)
+    print(f"  MAE={regression_eval['mae']:.3f}  RMSE={regression_eval['rmse']:.3f}  "
+          f"R2={regression_eval['r2']:.3f}  Spearman={regression_eval['spearman_rank_correlation']:.3f} "
+          f"(n_test={regression_eval['n_test']})")
+
+    print("Evaluating simulation calibration (self-consistency check)...")
+    calibration_eval = evaluate_calibration(model)
+    print(f"  Brier={calibration_eval['brier_score_win_prob']:.4f}  "
+          f"LogLoss={calibration_eval['log_loss_win_prob']:.4f}  "
+          f"Top1WinAcc={calibration_eval['top1_winner_accuracy']:.3f}  "
+          f"Podium P@3={calibration_eval['podium_precision_at_3_mean']:.3f} "
+          f"(n_trials={calibration_eval['n_trials']})")
+
+    print(f"\n{'Pos':>3} {'Driver':6} {'Team':<16} {'Grid':>4}  {'AvgPos':>6}  {'Win%':>6}  {'Podium%':>8}  {'Top10%':>7}")
     for i, row in results.iterrows():
         print(f"{i+1:3d} {row['driver']:6s} {row['team']:<16} {int(row['grid']):4d}  "
               f"{row['avg_pos']:6.2f}  {row['win_prob']:6.1f}  {row['podium_prob']:8.1f}  {row['points_prob']:7.1f}")
@@ -568,5 +735,7 @@ if __name__ == "__main__":
     print(f"P2: {top3[1]}")
     print(f"P3: {top3[2]}")
 
-    save_outputs(model, results, weather_risk, weather_source, data_source)
+    evaluation = {"regression_fit": regression_eval, "calibration": calibration_eval}
+    save_outputs(model, results, weather_risk, weather_source, data_source, evaluation)
     print(f"\nSaved full ranking to {DATA / 'baku_2026_predictions.csv'} and {DATA / 'baku_2026_predictions.json'}")
+    print(f"Saved evaluation metrics to {ARTIFACTS / 'evaluation_metrics.json'}")

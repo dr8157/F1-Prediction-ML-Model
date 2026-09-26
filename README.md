@@ -61,3 +61,20 @@ Data source: frozen verified snapshot (FastF1 live session and formula1.com scra
 **Predicted podium: 🥇 RUS — 🥈 LEC — 🥉 PIA**
 
 Full machine-readable output: [`data/baku_2026_predictions.csv`](data/baku_2026_predictions.csv) / [`data/baku_2026_predictions.json`](data/baku_2026_predictions.json).
+
+### Model evaluation
+
+Because the race hasn't been driven yet (and this environment can't reach FastF1/Ergast's live-timing hosts to pull real historical results — see `assumptions.md` §5), evaluation checks **internal consistency** rather than real-world backtest accuracy: does the model learn the declared physics, and is the simulation's probability math unbiased.
+
+| Check | Metric | Latest value | What it means |
+|---|---|---:|---|
+| Regression fit (held-out 20%) | MAE | 2.75 | Avg. error in raw finish-index units |
+| | RMSE | 4.06 | Root-mean-squared error, penalizes big misses |
+| | R² | 0.76 | Share of variance explained |
+| | Spearman rank corr. | 0.89 | Does it get driver **order** right (what actually matters) |
+| Simulation calibration (300 synthetic mock races) | Brier score | 0.024 | Lower is better; 0.25 = no-skill baseline |
+| | Log loss | 0.082 | Lower is better; penalizes confident wrong calls |
+| | Top-1 winner accuracy | 63.7% | How often the model's favorite actually won (vs. 5% random, field of 20) |
+| | Podium precision@3 | 77.1% | Of the predicted top 3, how many actually finished top 3 |
+
+Full metrics + a 10-bucket reliability table (predicted probability vs. realized frequency) are saved to `data/baku_model/evaluation_metrics.json` on every run.
